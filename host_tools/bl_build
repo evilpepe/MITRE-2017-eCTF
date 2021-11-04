@@ -1,0 +1,116 @@
+#!/usr/bin/env python
+"""
+Bootloader Build Tool
+
+This tool is responsible for building the bootloader from source and copying
+the build outputs into the host tools directory for programming.
+"""
+import os
+import random
+import shutil
+import subprocess
+import sys
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
+from intelhex import IntelHex
+from base64 import b64encode
+import json
+
+
+FILE_DIR = os.path.abspath(os.path.dirname(__file__))
+
+def make_bootloader(readback_password=None,firmware_key=None,mac_key=None):
+    """
+    Build the bootloader from source.
+
+    Return:
+        True if successful, False otherwise.
+    """
+    # Change into directory containing bootloader.
+    os.chdir('../bootloader')
+
+    subprocess.call('make clean', shell=True)
+    # Call make in subprocess to build bootloader.
+    if readback_password is not None or firmware_key is not None:
+        status = subprocess.call('make READBACK_PASSWORD="%s" FIRMWARE_KEY="%s" MAC_KEY="%s"' % (readback_password,firmware_key,mac_key), shell=True)
+    else:
+        status = subprocess.call('make ')
+
+
+    # Return True if make returned 0, otherwise return False.
+    return (status == 0)
+
+def copy_artifacts():
+    """
+    Copy bootloader build artifacts into the host tools directory.
+    """
+    # Get directory containing this file (host_tools).
+    dst_dir = FILE_DIR
+
+    # Get directory containing bootloader output (bootloader).
+    src_dir = os.path.join(os.path.dirname(dst_dir), 'bootloader')
+
+    # Copy build artifacts from bootloader directory.
+    shutil.copy(os.path.join(src_dir, 'flash.hex'), dst_dir)
+    shutil.copy(os.path.join(src_dir, 'eeprom.hex'), dst_dir)
+    shutil.copy(os.path.join(dst_dir, 'lfuse.hex'), src_dir)
+    shutil.copy(os.path.join(dst_dir, 'hfuse.hex'), src_dir)
+    shutil.copy(os.path.join(dst_dir, 'efuse.hex'), src_dir)
+
+def generate_readback_password():
+    """
+    Generate secret password for readback tool and store to secret file.
+    """
+    # Generate AES key for use in readback password
+    readback_password = get_random_bytes(32)
+
+    return readback_password
+
+def generate_firmware_specifics():
+    #Generate AES key for encrypting firmware
+    firmware_key = get_random_bytes(32)
+    mac_key = get_random_bytes(32)
+    return (firmware_key,mac_key)
+
+def format_key(key):
+    #change keys into a 0x00,0x00,etc.. format that the bootloader can understand
+    key = bytes(key).encode('hex')
+    a = list(map(''.join, zip(*[iter(key)]*2)))
+    key = ''.join(map(lambda i: '0x' + i + ',', a))
+    key = '{' + key + '}'
+    key = key[0:len(key)-2]
+    key = key + '}'
+    return(key)
+
+
+def write_fuse_file(fuse_name, fuse_value):
+    hex_file = IntelHex()
+    hex_file[0] = fuse_value
+
+    with open(os.path.join(FILE_DIR, fuse_name + '.hex'), 'wb+') as outfile:
+        hex_file.tofile(outfile, format='hex')
+
+if __name__ == '__main__':
+    readback_password = generate_readback_password()
+    firmware_key,mac_key = generate_firmware_specifics()
+
+    #export to secret_build_output
+    json_k = ['firmware_key','readback_password','mac_key']
+    json_v = [b64encode(x).decode('utf-8') for x in firmware_key,readback_password,mac_key]
+    result = json.dumps(dict(zip(json_k,json_v)))
+    with open('secret_build_output.txt','w') as secret_build_output:
+        secret_build_output.write(result)
+
+    # Format keys to be sent to bootloader
+    readback_password = format_key(readback_password)
+    firmware_key = format_key(firmware_key)
+    mac_key = format_key(mac_key)
+
+    #build the bootloader from source using information generated above
+    if not make_bootloader(readback_password=readback_password,firmware_key=firmware_key,mac_key = mac_key):
+        print "ERROR: Failed to compile bootloader."
+        sys.exit(1)
+    write_fuse_file('lfuse', 0xFF)
+    write_fuse_file('hfuse', 0xD8)
+    write_fuse_file('efuse', 0xFC)
+    copy_artifacts()

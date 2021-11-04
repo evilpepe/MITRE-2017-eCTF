@@ -1,0 +1,76 @@
+#!/usr/bin/env python
+"""
+Firmware Bundle-and-Protect Tool
+
+"""
+import argparse
+import shutil
+import struct
+import ast
+
+from cStringIO import StringIO
+from intelhex import IntelHex
+from base64 import b64decode
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad
+
+if __name__ == '__main__':
+
+    #import secret_configure_output file as a dictionary
+    with open('secret_build_output.txt','r') as secret_configure_output:
+        keyDict = ast.literal_eval(secret_configure_output.read())
+
+    parser = argparse.ArgumentParser(description='Firmware Update Tool')
+
+    parser.add_argument("--infile",
+                        help="Path to the firmware image to protect.",
+                                                required=True)
+    parser.add_argument("--outfile", help="Filename for the output firmware.",
+                        required=True)
+    parser.add_argument("--version", help="Version number of this firmware.",
+                        required=True)
+    parser.add_argument("--message", help="Release message for this firmware.",
+                        required=True)
+
+    args = parser.parse_args()
+
+    # Parse Intel hex file.
+    firmware = IntelHex(args.infile)
+
+    # Get version and size.
+    firmware_size = firmware.maxaddr() + 1
+    version = int(args.version)
+
+    # Add release message to end of hex (null-terminated).
+    sio = StringIO()
+    firmware.putsz(firmware_size, (args.message + '\0'))
+    for segment_start, segment_end in firmware.segments():
+        hex_data = firmware.tobinstr(start = segment_start, size = segment_end - segment_start)
+
+    #encrypt hex file
+    cipher = AES.new(b64decode(keyDict['firmware_key']), AES.MODE_CBC)
+
+    ciphertext = cipher.encrypt(pad(hex_data, AES.block_size))
+    # Format version and firmware size
+    metadata = struct.pack('>HH',version,firmware_size)
+
+
+    #compute cbc mac of the data
+    iv = bytearray(16)
+    macCipher = AES.new(b64decode(keyDict['mac_key']), AES.MODE_CBC, iv=iv)
+    macText = macCipher.encrypt(ciphertext)
+    cipherMac = macText[-16:]
+
+    #compute cbc mac of the metatdata
+    metaCipher = AES.new(b64decode(keyDict['mac_key']), AES.MODE_CBC, iv=iv)
+    metaMac = metaCipher.encrypt(pad(metadata,AES.block_size))
+
+
+    with open(args.outfile, 'wb+') as outfile:
+        hexOutput = IntelHex()
+        finalIO = StringIO()
+        hexOutput.putsz(0,ciphertext)
+        hexOutput.write_hex_file(finalIO)
+        finalOutput = finalIO.getvalue()
+        finalOutput = metadata.encode('hex') + '\n' + metaMac.encode('hex') + '\n' + cipher.iv.encode('hex') + '\n' + cipherMac.encode('hex') +'\n' + finalOutput
+        outfile.write(finalOutput)

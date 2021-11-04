@@ -1,0 +1,94 @@
+#!/usr/bin/env python
+"""
+Memory Readback Tool
+
+A frame consists of four sections:
+1. One byte for the length of the password.
+2. The variable-length password.
+3. Four bytes for the start address.
+4. Four bytes for the number of bytes to read.
+
+  [ 0x01 ]  [ variable ]  [ 0x04 ]    [ 0x04 ]
+-------------------------------------------------
+| PW Length | Password | Start Addr | Num Bytes |
+-------------------------------------------------
+"""
+
+import serial
+import struct
+import sys
+import argparse
+import ast
+
+
+from base64 import b64decode
+from Crypto.Cipher import AES
+
+RESP_OK = b'\x00'
+RESP_ERROR = b'\x01'
+
+def construct_request(start_addr, num_bytes):
+    return struct.pack('>II', start_addr, num_bytes)
+
+
+if __name__ == '__main__':
+    try:
+        with open('secret_build_output.txt','r') as secret_configure_output:
+            keyDict = ast.literal_eval(secret_configure_output.read())
+    except:
+        pass # File not found
+
+    cipher = AES.new(b64decode(keyDict['readback_password']),AES.MODE_CBC)
+
+
+    parser = argparse.ArgumentParser(description='Memory Readback Tool')
+
+    parser.add_argument("--port", help="Serial port to send update over.",
+                        required=True)
+    parser.add_argument("--address", help="First address to read from.",
+                        required=True)
+    parser.add_argument("--num-bytes", help="Number of bytes to read(must be a multiple of 16).",
+                        required=True)
+    parser.add_argument("--datafile", help="File to write data to (optional).")
+    args = parser.parse_args()
+
+    if int(args.num_bytes) % 16 != 0:
+        raise RuntimeError("ERROR: Number of bytes must be a multiple of 16")
+
+    request = construct_request(int(args.address), int(args.num_bytes))
+
+    # Open serial port. Set baudrate to 115200. Set timeout to 2 seconds.
+    ser = serial.Serial(args.port, baudrate=115200, timeout=2)
+
+    # Wait for bootloader to reset/enter readback mode.
+    while ser.read(1) != 'R':
+        pass
+    print("Reading...")
+
+    # Wait for bootloader to finish setup
+    while ser.read(1) != RESP_OK:
+        pass
+
+    #send the iv
+    ser.write(cipher.iv)
+
+    #wait for acknowledgement of iv
+    while ser.read(1) != RESP_OK:
+        pass
+
+    # Send the request.
+    ser.write(request)
+
+    fullMessage = ''
+    # Read the data and append it to the full message.
+    for i in range(int(args.num_bytes)):
+        data = ser.read(1) #change
+        fullMessage = fullMessage + data
+
+    #decrypt request
+    pt = cipher.decrypt(fullMessage)
+    print(pt.encode('hex'))
+    # Write raw data to file (optional).
+    if args.datafile:
+        with open(args.datafile, 'wb+') as datafile:
+            datafile.write(fullMessage)
